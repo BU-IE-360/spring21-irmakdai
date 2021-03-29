@@ -2,4 +2,4 @@
 
 ## Week 0
 
-[Here](hw0.html) is my interesting R examples.
+[Here](files/hw0.html) is my interesting R examples.
