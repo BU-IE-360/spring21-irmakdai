@@ -2,4 +2,4 @@
 
 ## Week 0
 
-[Here](master-branch/hw0.html) is my interesting R examples.
+[Here](hw0.html) is my interesting R examples.
