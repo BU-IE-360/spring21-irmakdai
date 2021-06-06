@@ -1,0 +1,648 @@
+---
+title: "IE 360 - HW 3"
+author: "Irmak Dai"
+date: "June 6, 2021"
+output: 
+  html_document:
+          toc: true
+          toc_depth: 3
+          toc_float: true
+          number_sections: true
+          code_folding: hide
+          theme: spacelab 
+---
+
+# Introduction & Problem Description
+
+The aim of this homework to predict tomorrow's hourly electricity consumption of Turkey. The consumption series is available on [EPIAS](https://seffaflik.epias.com.tr/transparency/tuketim/gerceklesen-tuketim/gercek-zamanli-tuketim.xhtml).
+
+The time period of 01.01.2016-20.05.2021 is used.
+
+Firstly, a few approaches should be used to make electricity consumption data as stationary as possible. Then, autoregressive models and moving average models will be compared.
+
+
+
+# Initial Processing
+
+Loading the packages:
+
+```{r, warning=FALSE, message=FALSE, error=FALSE, results='hide'}
+library(zoo)
+library(lubridate)
+library(tidyverse)
+library(scales)
+library(tsibble)
+library(urca)
+library(forecast)
+Sys.setlocale("LC_TIME", "English")
+```
+Importing the data:
+
+```{r}
+raw_data <- read.csv("C:/Users/Asus/Desktop/Spring 2021/IE 360/HW3/RealTimeConsumption-01012016-20052021.csv")
+head(raw_data)
+```
+
+Manipulation and type adjustments:
+
+```{r}
+hourly <- raw_data %>%
+  mutate(date_hour=paste(Date,Hour,sep = " ")) %>%
+  mutate(date=as.POSIXct(date_hour,format="%d.%m.%Y %H:%M"),consumption=as.numeric(gsub(",","",Consumption..MWh.))) %>%
+  select(date,consumption)
+```
+
+# Analysis
+
+We have hourly data. That means we may have multiple types of seasonality: hourly, daily, weekly, monthly, etc. For example;
+consumption is expected to be higher during the working hours than at night. Also, on the weekends we expect a lower electricity consumption, considering the electricity usage in factories. Consumption also may depend on the season of the year, or public holidays.  
+
+
+```{r}
+ggplot(hourly,aes(x=date,y=consumption))+
+  geom_line()+
+  theme_minimal()+
+  scale_x_datetime(breaks = date_breaks("1 year"), date_labels = "%Y")+
+  labs(title="Hourly Electricity Consumption (MW/h)")
+```
+
+Key observations:
+
+* Data has many ups and downs.
+* The decrease in the first half of 2020 is probably due to Covid-19 lockdowns, when factories stopped working.
+* Variation around the trend does not vary much with the level of time series; additive decomposition is a better choice to use.
+* We see the effect of religious holidays in each year.
+* Electricity consumption increases in the summer.
+* There is a slight increasing trend in the data.
+* There is an outlier in the first half of 2016, which might be an error in the data, or a country-wide power cut. I will remove the outlier and assign the mean value of the previous and following observation.
+
+
+Dealing with the outlier:
+
+```{r}
+i <- which.min(hourly$consumption)
+hourly[i,'consumption'] <- mean(c(hourly[i-1,'consumption'],hourly[i+1,'consumption']))
+```
+
+Outlier-removed time series data: 
+
+```{r}
+ggplot(hourly,aes(x=date,y=consumption))+
+  geom_line()+
+  theme_minimal()+
+  scale_x_datetime(breaks = date_breaks("1 year"), date_labels = "%Y")+
+  labs(title="Hourly Electricity Consumption (MW/h)")
+
+```
+
+
+Apparently, data is not stationary. Let's also check the autocorrelation plot and KPSS test. 
+
+```{r}
+acf(hourly$consumption)
+```
+
+We see a very high correlation in lag 24.
+
+```{r}
+hourly$consumption %>%
+  ur.kpss()%>%
+  summary()
+```
+The null hypothesis is the stationarity of data. Test statistic is far beyond the critical value, reject the null hypothesis and conclude that data is not stationary.
+
+## Task 1
+
+### Hourly decomposition
+
+
+```{r}
+ts_hourly <- ts(hourly$consumption, frequency = 24)
+```
+
+In our previous analysis, we decided that additive model would be a greater choice for this time series. Let's use `decompose()` function to decompose the series into trend, seasonal, and random component.
+
+```{r}
+decomposed_hourly <- decompose(ts_hourly, type="additive")
+plot(decomposed_hourly)
+
+```
+
+```{r}
+random_hourly <- decomposed_hourly$random
+plot(random_hourly)
+```
+
+
+Mean is quite constant, but variance is slightly increasing. Let's look at autocorrelation functions:
+
+```{r}
+acf(random_hourly, na.action = na.pass, lag.max = 200)
+pacf(random_hourly, na.action = na.pass, lag.max = 200)
+```
+
+PACF removes the effects which are already explained by previous lags. But we still see relatively high autocorrelation in lag 168 (`24*7`) in PACF, and also in ACF. That indicates that the consumption values in the same days of the weeks are correlated.
+
+
+```{r}
+random_hourly %>%
+  ur.kpss() %>%
+  summary()
+```
+
+Test statistic is very low, which supports the stationarity of data. But also there is autocorrelation in the random component, it is not sensible to use this frequency considering we have other options.
+
+
+### Daily decomposition
+
+```{r}
+daily <- hourly %>%
+  group_by(date(date)) %>%
+  summarise(consumption=mean(consumption)) %>%
+  rename(date='date(date)')
+```
+
+
+```{r}
+ggplot(daily,aes(x=date,y=consumption))+
+  geom_line()+
+  theme_minimal()+
+  labs(title="Daily Electricity Consumption per hour (MW/h)")
+```
+```{r}
+acf(daily$consumption)
+```
+
+We see high autocorrelation in lag 7, which is not surprising.
+
+```{r}
+ts_daily <- ts(daily$consumption, frequency = 7)
+decomposed_daily <- decompose(ts_daily, type = "additive")
+plot(decomposed_daily)
+```
+
+```{r}
+random_daily <- decomposed_daily$random
+plot(random_daily)
+```
+
+Constant mean assumption is satisfied. Variance does not change much over time.
+
+```{r}
+acf(random_daily, na.action = na.pass)
+pacf(random_daily, na.action = na.pass)
+```
+
+We don't see a significant autocorrelation. Although the values are not not so high, we see relatively higher values in multiples of 4, which implies monthly seasonality.
+
+```{r}
+random_daily %>%
+  ur.kpss() %>%
+  summary()
+```
+Stationarity is not rejected by this test.
+
+### Weekly decomposition
+
+```{r}
+weekly <- daily %>%
+  group_by(yearweek(date)) %>%
+  summarise(consumption=mean(consumption)) %>%
+  rename(yearweek='yearweek(date)')
+```
+
+
+```{r}
+ggplot(weekly,aes(x=yearweek,y=consumption))+
+  geom_line()+
+  theme_minimal()+
+  labs(title="Weekly Electricity Consumption per hour (MW/h)")
+```
+
+```{r}
+acf(weekly$consumption)
+```
+
+```{r}
+
+ts_weekly <- ts(weekly$consumption, frequency = 52)
+decomposed_weekly <- decompose(ts_weekly, "additive")
+plot(decomposed_weekly)
+```
+
+```{r}
+random_weekly <- decomposed_weekly$random
+plot(random_weekly)
+```
+
+There are times when mean changes, but we can say that constant mean is satisfies in general. There are also times when variance changes, but it may be acceptable.
+
+```{r}
+acf(random_weekly, na.action = na.pass, lag.max = 104)
+pacf(random_weekly, na.action = na.pass, lag.max = 104)
+```
+
+We do not see a very high autocorrelation.
+
+```{r}
+random_weekly %>%
+  ur.kpss() %>%
+  summary()
+```
+Again, the stationarity is not rejected.
+
+### Monthly decomposition
+
+```{r}
+monthly <- daily %>%
+  group_by(yearmonth(date)) %>%
+  summarise(consumption=mean(consumption)) %>%
+  rename(month='yearmonth(date)')
+```
+
+```{r}
+ggplot(monthly,aes(x=as.Date(month),y=consumption))+
+  geom_line()+
+  theme_minimal()+
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y")+
+  labs(title="Monthly Electricity Consumption per hour (MW/h)")
+```
+
+
+
+
+```{r}
+acf(monthly$consumption)
+```
+```{r}
+ts_monthly <- ts(monthly$consumption, frequency = 12, start = c(2016,1))
+decomposed_monthly <- decompose(ts_monthly, "additive")
+plot(decomposed_monthly)
+```
+```{r}
+monthplot(ts_monthly)
+
+```
+
+In this plot, we can see the effect of month in electricity consumption. In spring and autumn, we observe relatively lower consumption. Generally the highest electricity consumption is in July and August.
+
+```{r}
+seasonplot(ts_monthly, year.labels=TRUE, year.labels.left=TRUE, col=1:20, pch=19)
+
+```
+
+Again, we see that the pattern within years resembles to each other.
+
+
+```{r}
+random_monthly <- decomposed_monthly$random
+plot(random_monthly)
+```
+
+
+```{r}
+acf(random_monthly, na.action = na.pass)
+pacf(random_monthly, na.action = na.pass)
+```
+
+We don't see a significant autocorrelation.
+
+```{r}
+random_monthly %>%
+  ur.kpss() %>%
+  summary()
+```
+Again, the stationarity is not rejected.
+
+## Task 2
+
+It is assumed that frequency is 168 (24*7) for the rest of the report. Which means we decided that both the day of week and hour is meaningful to explain hourly electricity consumption.
+
+```{r}
+ts_hd <- ts(hourly$consumption, frequency = 24*7)
+decomposed_hd <- decompose(ts_hd, type = "additive")
+plot(decomposed_hd)
+
+```
+
+* We still see a seasonality in trend. 
+
+```{r}
+random_hd <- decomposed_hd$random
+plot(random_hd)
+```
+
+* Random component has constant mean, variance does not change over time significantly.
+
+
+```{r}
+acf(random_hd, na.action=na.pass, lag.max = 168)
+pacf(random_hd, na.action = na.pass,  lag.max = 168)
+```
+
+```{r}
+random_hd %>%
+  ur.kpss() %>%
+  summary()
+```
+Test statistic is very small, which we like. We fail to reject the null hypothesis and conclude that there is not enough evidence against the stationarity of data. We can continue with this series and apply autoregressive and moving average models.
+
+## Task 3 (AR Model)
+
+```{r}
+deseasonalized_hd <- ts_hd-decomposed_hd$seasonal
+plot(deseasonalized_hd)
+```
+
+Deseasonalized series still exhibit some level of seasonality. That is because we chose the frequency 168 (`24*7`), but the consumption data also may have monthly etc. seasonality. 
+
+Removing the trend: (It is the same with accessing the random component of the decomposed object)
+
+```{r}
+detrend_hd <- deseasonalized_hd-decomposed_hd$trend
+ts.plot(detrend_hd)
+```
+
+```{r}
+AIC_vector <- vector()
+model_ar <- arima(random_hd, order = c(1,0,0))
+AIC_vector <- append(AIC_vector, AIC(model_ar))
+summary(model_ar)
+
+```
+
+```{r}
+model_ar2 <- arima(random_hd, order = c(2,0,0))
+AIC_vector <- append(AIC_vector, AIC(model_ar2))
+summary(model_ar2)
+
+```
+AIC decreased relative to order 1 autoregressive model. Let's try a higher order:
+
+```{r}
+model_ar3 <- arima(random_hd, order = c(3,0,0))
+AIC_vector <- append(AIC_vector, AIC(model_ar3))
+summary(model_ar3)
+```
+AIC decreased by only a very small amount.
+
+```{r}
+model_ar4 <- arima(random_hd, order=c(4,0,0))
+AIC_vector <- append(AIC_vector, AIC(model_ar4))
+summary(model_ar4)
+```
+AIC decreased again. Let's increase the order again:
+
+```{r}
+model_ar5 <-arima(random_hd, order=c(5,0,0))
+AIC_vector <- append(AIC_vector, AIC(model_ar5))
+summary(model_ar5)
+```
+
+Still, we observe a decrease in AIC values. In order not to build an over complex model, I will not continue to increase the order of autoregression. Up to now, the smallest AIC value is observed in 5th model.  
+
+
+
+## Task 4 (MA Model)
+
+
+```{r}
+model_ma <- arima(random_hd, order=c(0,0,1))
+AIC_vector <- append(AIC_vector, AIC(model_ma))
+summary(model_ma)
+```
+
+```{r}
+model_ma2 <- arima(random_hd, order=c(0,0,2))
+AIC_vector <- append(AIC_vector, AIC(model_ma2))
+summary(model_ma2)
+```
+```{r}
+model_ma3 <- arima(random_hd, order=c(0,0,3))
+AIC_vector <- append(AIC_vector, AIC(model_ma3))
+summary(model_ma3)
+```
+```{r}
+model_ma4 <- arima(random_hd, order=c(0,0,4))
+AIC_vector <- append(AIC_vector, AIC(model_ma4))
+summary(model_ma4)
+```
+
+```{r}
+model_ma5 <- arima(random_hd, order = c(0,0,5))
+AIC_vector <- append(AIC_vector, AIC(model_ma5))
+summary(model_ma5)
+```
+
+Again, as we increase the order, AIC decreases. I decided to cut off at order of 5 in order to build a simpler model.
+
+
+## Task 5
+
+```{r}
+which.min(AIC_vector)
+```
+
+The smallest AIC value is observed in AR(5) model, with value `714945.8`. 
+
+### ARMA Model
+
+In both AR and MA models, we observed that AIC decreases as orders increase. I will start with an ARMA model of order (5,5) and experiment a little bit. 
+
+```{r,warning=FALSE}
+AIC_vector_ARMA <- vector()
+model_arma55 <- arima(random_hd, order = c(5,0,5))
+AIC_vector_ARMA <- append(AIC_vector_ARMA,AIC(model_arma55))
+summary(model_arma55)
+```
+
+AIC value decreased only by a moderate amount compared to AR(5) model. Let's try lower order values.
+
+```{r,warning=FALSE}
+model_arma54 <- arima(random_hd, order = c(5,0,4))
+AIC_vector_ARMA <- append(AIC_vector_ARMA,AIC(model_arma54))
+summary(model_arma54)
+```
+
+```{r,warning=FALSE}
+model_arma45 <- arima(random_hd, order = c(4,0,5))
+AIC_vector_ARMA <- append(AIC_vector_ARMA,AIC(model_arma45))
+summary(model_arma45)
+```
+
+
+
+```{r,warning=FALSE}
+model_arma44 <- arima(random_hd, order = c(4,0,4))
+AIC_vector_ARMA <- append(AIC_vector_ARMA,AIC(model_arma44))
+summary(model_arma44)
+```
+
+In 3 models; ARMA(5,4), ARMA(4,5), and ARMA(4,4); AIC decreased relative to ARMA(5,5). Let's try even smaller values:
+
+```{r,warning=FALSE}
+model_arma43 <- arima(random_hd, order = c(4,0,3))
+AIC_vector_ARMA <- append(AIC_vector_ARMA,AIC(model_arma43))
+summary(model_arma43)
+```
+```{r,warning=FALSE}
+model_arma34 <- arima(random_hd, order = c(3,0,4))
+AIC_vector_ARMA <- append(AIC_vector_ARMA,AIC(model_arma34))
+summary(model_arma34)
+```
+
+AIC values started to increase Let's stop here and select the model with the smallest AIC value.
+
+```{r}
+AIC_vector_ARMA
+which.min(AIC_vector_ARMA)
+```
+
+ARMA(4,4) model has the smallest AIC value. I will continue with this model.
+
+
+### Test
+
+
+```{r,warning=FALSE}
+model_fitted <- random_hd - residuals(model_arma44)
+
+df <- cbind(hourly$date,as.data.frame(random_hd),as.data.frame(model_fitted))
+colnames(df) <- c("time","random", "fitted")
+
+color <- c(random="blue", fitted="red")
+
+ggplot(df, aes(x=time))+
+  geom_line(aes(y=random,color='random'))+
+  geom_line(aes(y=fitted, color='fitted'), alpha=0.6)+
+  scale_color_manual(values = color) +
+  theme_minimal()
+
+```
+
+Model fits to the random component quite well. 
+
+```{r, warning=FALSE}
+model_fitted_transformed <- decomposed_hd$seasonal+decomposed_hd$trend+model_fitted
+df2 <- cbind(hourly, model_fitted_transformed)
+
+color <- c(actual="blue", fitted="red")
+
+ggplot(df2, aes(x=date))+
+  geom_line(aes(y=consumption,color='actual'))+
+  geom_line(aes(y=model_fitted_transformed, color='fitted'), alpha=0.6)+
+  scale_color_manual(values = color) +
+  theme_minimal()
+
+```
+
+Actual and fitted series are quite similar.
+
+### Forecast 
+
+Since the frequency is set to 168, we have trend and seasonal components for all data points except the first 84 and last 84 ones. Seasonal component repeats itself, so we can simply reiterate it. Random component will be estimated by ARMA(4,4) model that we built in earlier sections. To estimate trend component, I have a few options. I can use the latest trend component or I can also build a model on trend. I decided to use `forecast()` function to estimate missing trend values.
+
+```{r, warning=FALSE}
+
+forecasted_random <- as.numeric(forecast(model_arma44, h=84)$mean)
+forecast_seasonal <- as.numeric(decomposed_hd$seasonal[85:168])
+forecast_trend <- as.numeric(forecast(decomposed_hd$trend, h=84)$mean)
+forecast <- forecasted_random+forecast_seasonal+forecast_trend
+df2 <- cbind(df2, c(rep(NA, nrow(df2)-84),forecast))
+colnames(df2)[4] <- "forecasted"
+
+color <- c(actual="blue", fitted="red", forecasted="green")
+ggplot(df2, aes(x=date))+
+  geom_line(aes(y=consumption, color="actual"))+
+  geom_line(aes(y=model_fitted_transformed, color="fitted"), alpha=0.5)+
+  geom_line(aes(y=forecasted,color="forecasted"))+
+  scale_color_manual(values = color)
+
+df2 %>%
+  filter(date>="2021-05-06 00:00:00") %>%
+  ggplot(aes(x=date))+
+  geom_line(aes(y=consumption, color="actual"))+
+  geom_line(aes(y=model_fitted_transformed, color="fitted"))+
+  geom_line(aes(y=forecasted,color="forecasted"))+
+  scale_color_manual(values = color)
+```
+
+
+### Evaluation
+
+```{r}
+accu<-function(actual,forecast){
+  n=length(actual)
+  error=actual-forecast
+  mean=mean(actual)
+  sd=sd(actual)
+  CV=sd/mean
+  FBias=sum(error)/sum(actual)
+  MAPE=sum(abs(error/actual))/n
+  RMSE=sqrt(sum(error^2)/n)
+  MAD=sum(abs(error))/n
+  MADP=sum(abs(error))/sum(abs(actual))
+  WMAPE=MAD/mean
+  l=data.frame(n,mean,sd,CV,FBias,MAPE,RMSE,MAD,MADP,WMAPE)
+  return(l)
+}
+```
+
+```{r}
+df3 <- df2 %>%
+  filter(date>="2021-05-06 00:00:00") %>%
+  mutate(forecasted=ifelse(is.na(forecasted),model_fitted_transformed, forecasted)) %>%
+  select(date, consumption, forecasted) %>%
+  mutate(error=consumption-forecasted)
+
+```
+
+#### Daily bias
+
+```{r}
+daily_bias <- df3 %>%
+  group_by(date(date)) %>%
+  summarise(error_sum=sum(error), actual_sum=sum(consumption)) %>%
+  mutate(daily_bias=error_sum/actual_sum)
+
+daily_bias
+```
+
+
+#### Daily mean absolute percentage error
+
+
+  
+```{r}
+daily_mape <- df3 %>%
+  group_by(date(date)) %>%
+  summarise(daily_mape=sum(abs(error/forecasted))/24)
+
+daily_mape
+```
+  
+
+#### Weighted mean absolute percentage error
+
+For the forecasted portion:
+
+```{r}
+accu(tail(df2$consumption,84),tail(df2$forecasted,84))
+```
+
+For the fitted & forecasted portion of given period of the task:
+
+```{r}
+accu(tail(df2$consumption,14*24),c(df2$model_fitted_transformed[(nrow(df2)-14*24):(nrow(df2)-85)],df2$forecasted[(nrow(df2)-83):nrow(df2)]))
+```
+
+In both, WMAPE values seem small, which is nice.
+ 
+# Conclusion
+
+In this homework, I decomposed the time series into different levels. Then one of the decomposition is selected and a suitable ARMA model is built for the random component. Then I evaluated the model based on daily bias, daily mean absolute percentage error, and weighted mean absolute percentage error.
+
+# References
+
+* (https://ibf.org/knowledge/glossary/weighted-mean-absolute-percentage-error-wmape-299)
+* IE 360 Lecture notebooks
