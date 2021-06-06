@@ -11,3 +11,7 @@
 ## HW 2
 
 [Here](files/hw2.html) is my time series regression homework.
+
+## HW 3
+
+[Here](files/hw3.html) is my time series decomposition & ARMA homework.
