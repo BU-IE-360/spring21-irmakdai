@@ -15,3 +15,7 @@
 ## HW 3
 
 [Here](files/hw3.html) is my time series decomposition & ARMA homework.
+
+## Final
+
+[Here](files/final.html) is my final exam.
